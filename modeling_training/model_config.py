@@ -1,7 +1,6 @@
 
 import tensorflow as tf
 config = {
-    
         'model_dimension': 512,
         'embeddings_dimension': 128,
         'attention_num_heads': 8,

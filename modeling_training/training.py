@@ -12,7 +12,7 @@ from utils import CaptureStdoutToFile
 #
 # Reading content_map ids for content embeddings layers
 #
-with open('encoded_content_map_v2.json', 'r') as f:
+with open('encoded_content_map_v2.json', 'r') as f:  # output of data_prepare.py
     encoded_content_map = json.load(f)
     
 #
@@ -119,8 +119,8 @@ def make_tpu_train_loop(strategy, model, optimizer = None, learning_rate = None)
             strategy.run(valid_step_fn, args=(valid_data,))
 
    
-    def train_loop(train_ds, 
-                   valid_ds = None, 
+    def train_loop(train_ds,
+                   valid_ds = None,
                    batch_size = 64,
                    steps_per_call = 128,
                    steps_per_epoch = 5500,
@@ -165,7 +165,7 @@ def make_tpu_train_loop(strategy, model, optimizer = None, learning_rate = None)
                     float(valid_loss.result()),
                     float(valid_accuracy.result()) * 100,
                     float(valid_auc.result())))
-    return train_loop
+    return train_loop  # 这里return的是一个 def
     
 #    
 # Detect hardware, return appropriate distribution strategy
@@ -190,8 +190,8 @@ from modeling import RiiidAnswerModel
 
 with strategy.scope():
     tpu_model = RiiidAnswerModel(
-        encoded_content_map,
-        **config,
+        encoded_content_map,  # output of data_prepare.py
+        **config,  # 模型config
         )
 #
 # Functions to parse tfrecords data from gcs
@@ -302,11 +302,12 @@ train_loop = make_tpu_train_loop(strategy, tpu_model,
 # Start training loop
 #
 with CaptureStdoutToFile('training.log'):
-    train_loop(train_ds, valid_ds, 
-           steps_per_call = 128, 
-           batch_size = BATCH_SIZE, 
-           steps_per_epoch = STEPS_PER_EPOCH, 
-           epochs = EPOCHS)
+    train_loop(train_ds, valid_ds,
+               steps_per_call = 128,
+               batch_size = BATCH_SIZE,
+               steps_per_epoch = STEPS_PER_EPOCH,
+               epochs = EPOCHS
+               )
 #
 # Saving model weights
 #           

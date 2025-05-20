@@ -1,3 +1,6 @@
+"""
+数据处理
+"""
 
 import numpy as np # linear algebra
 import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)
@@ -10,7 +13,7 @@ import sklearn
 import sys
 #
 # Read training table
-# We use the pickle file provided 
+# We use the pickle file provided
 # https://www.kaggle.com/rohanrao/tutorial-on-reading-large-datasets/data?select=riiid_train.pkl.gzip
 # Thanks to @Vopani
 
@@ -29,17 +32,17 @@ train = train.merge(tmp_df, on=['user_id', 'timestamp', 'task_container_id'], ho
 del tmp_df
 
 #
-# Compute question_elapsed_time and question_had_explanation 
+# Compute question_elapsed_time and question_had_explanation
 # then drop prior_question_elapsed_time, prior_question_had_explanation
 #
-tmp_df = train[['user_id', 'timestamp', 'task_container_id', 
-                             'prior_question_elapsed_time', 'prior_question_had_explanation']][train.content_type_id==False]
+tmp_df = train[['user_id', 'timestamp', 'task_container_id',
+                'prior_question_elapsed_time', 'prior_question_had_explanation']][train.content_type_id==False]
 
 tmp_df = tmp_df.drop_duplicates(['user_id', 'timestamp', 'task_container_id'])
 
 tmp_df['question_elapsed_time'] = tmp_df.prior_question_elapsed_time[1:].tolist()+[pd.NA]
 tmp_df['question_had_explanation'] = tmp_df.prior_question_had_explanation[1:].tolist()+[pd.NA]
-tmp_df = tmp_df[(tmp_df.user_id[1:].values==tmp_df.user_id[:-1].values).tolist()+[False]]
+tmp_df = tmp_df[(tmp_df.user_id[1:].values==tmp_df.user_id[:-1].values).tolist()+[False]]  # 筛选出 user_id 与前一行相同的行。最后一行由于追加了 False，所以不会被保留。
 tmp_df = tmp_df[['user_id', 'timestamp', 'task_container_id','question_elapsed_time','question_had_explanation']]
 train = train.merge(tmp_df, on=['user_id', 'timestamp', 'task_container_id'], how = 'left')
 train = train.drop(columns = ['prior_question_elapsed_time', 'prior_question_had_explanation'])
@@ -47,7 +50,6 @@ del tmp_df
 
 #
 # Compute stats on questions: question difficulty & question popularity
-#
 #
 question_stats = train[
                        train['content_type_id'] == False
@@ -57,9 +59,9 @@ question_stats = train[
                                'answered_correctly':'sum',
                                'user_id':'count'
                            }).reset_index()
-#Rescaling                          
-question_stats['difficulty'] = np.sqrt(1.0 - question_stats['answered_correctly']/question_stats['user_id'])
-question_stats['popularity'] = np.power(question_stats['user_id']/question_stats['user_id'].max(), 0.25)
+# Rescaling
+question_stats['difficulty'] = np.sqrt(1.0 - question_stats['answered_correctly']/question_stats['user_id'])  # 平均错误率开根号
+question_stats['popularity'] = np.power(question_stats['user_id']/question_stats['user_id'].max(), 0.25)  # question出现的频率
 question_stats = question_stats[['content_id', 'content_type_id', 'difficulty', 'popularity']]
 
 #
@@ -70,16 +72,19 @@ lectures = pd.read_csv('lectures.csv')
 
 encoded_questions = pd.DataFrame(data=questions[['question_id']].values, columns=['content_id'])
 encoded_questions['content_type_id'] = False
+
+# 将分类变量（categorical variable）转换为机器学习算法能够处理的数值变量（numerical variable）
 encoded_questions['encoded_question_id'] = LabelEncoder().fit_transform(questions.question_id)
 encoded_questions['bundle_id'] = LabelEncoder().fit_transform(questions.bundle_id)
+
 encoded_questions['correct_answer'] = questions.correct_answer
 encoded_questions['part'] = questions.part
 tags = questions.tags.fillna('').apply(lambda x: [1+int(t) for t in str(x).split()])
-encoded_questions['tags'] = tf.keras.preprocessing.sequence.pad_sequences(tags).tolist()
+encoded_questions['tags'] = tf.keras.preprocessing.sequence.pad_sequences(tags).tolist()  # 对 tags 数据进行填充操作，使其长度统一
 
-encoded_questions  = encoded_questions.merge(question_stats, 
-                        how = 'left', 
-                        on=['content_id', 'content_type_id']).fillna(0)
+encoded_questions  = encoded_questions.merge(question_stats,
+                                             how = 'left',
+                                             on=['content_id', 'content_type_id']).fillna(0)
 
 encoded_lectures = pd.DataFrame(data=lectures[['lecture_id']].values, columns=['content_id'])
 encoded_lectures['content_type_id'] = True
@@ -103,8 +108,8 @@ encoded_content = pd.DataFrame.from_dict({
 encoded_content['encoded_content_id'] = range(len(encoded_content))
 
 #
-# Put the generated encoded_content_id in the train table, 
-# 
+# Put the generated encoded_content_id in the train table,
+#
 
 train = train.merge(encoded_content, on=['content_id', 'content_type_id'], how = 'left')
 train = train.drop(columns = ['content_id', 'content_type_id', 'task_container_id'])

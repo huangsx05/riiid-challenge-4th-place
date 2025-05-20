@@ -1,3 +1,7 @@
+"""
+模型
+"""
+
 
 import tensorflow as tf
 
@@ -680,11 +684,13 @@ class ContentEmbeddingLayer(tf.keras.layers.Layer):
                 self.computed_params.assign(self._compute_content_params())
                 self.params_computed.assign(1.0)
             return tf.gather(self.computed_params, encoded_content_id)
+
+
 class RiiidAnswerModel(tf.keras.Model):
     r"""
     RiiidAnswerModel to output the logits of the target variable (answered_correctly)
     """
-    def __init__(self, 
+    def __init__(self,
                  encoded_content_map,
                  model_dimension = 512,
                  embeddings_dimension = 64,
@@ -704,9 +710,9 @@ class RiiidAnswerModel(tf.keras.Model):
                  timediff_attn: bool = True,
                  return_attn_coef: bool = False,
                  activation = 'gelu',
-                 embeddings_initializer = 
+                 embeddings_initializer =
                     tf.keras.initializers.TruncatedNormal(stddev=0.02),
-                 attn_weights_initializer = 
+                 attn_weights_initializer =
                     tf.keras.initializers.RandomUniform(
                      minval = 0.0,
                      maxval = 2.0),
