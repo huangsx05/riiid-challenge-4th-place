@@ -28,6 +28,9 @@ def make_loss_function():
 
 
 def make_tpu_train_loop(strategy, model, optimizer = None, learning_rate = None):
+    """
+    param strategy: 分布式策略
+    """
     with strategy.scope():
        if optimizer is None:
           if learning_rate is None:
@@ -45,7 +48,7 @@ def make_tpu_train_loop(strategy, model, optimizer = None, learning_rate = None)
 
        loss_function = make_loss_function()
 
-    @tf.function   
+    @tf.function
     def step_fn(inputs):
         """The computation to run on each TPU device."""
         answered_correctly = inputs['answered_correctly']
@@ -55,11 +58,15 @@ def make_tpu_train_loop(strategy, model, optimizer = None, learning_rate = None)
         y_true = tf.clip_by_value(answered_correctly, clip_value_min=0, clip_value_max=1)
         y_true = y_true[..., tf.newaxis]
         with tf.GradientTape() as tape:
-            logits = model(inputs, training=True)
+            # 模型
+            logits = model(inputs, training=True)  # 自动执行模型的 call 方法来完成前向传播
+            # 损失函数
             loss = loss_function(y_true, logits)
             loss = tf.reduce_mean(loss*label_mask, axis = -1)
             loss = tf.nn.compute_average_loss(loss)
+        # 反向传播求梯度
         grads = tape.gradient(loss, model.trainable_variables)
+        # 模型参数更新
         optimizer.apply_gradients(list(zip(grads, model.trainable_variables)))
         training_loss.update_state(loss*strategy.num_replicas_in_sync,
                                 sample_weight = tf.reduce_sum(label_mask))
@@ -72,14 +79,21 @@ def make_tpu_train_loop(strategy, model, optimizer = None, learning_rate = None)
 
     @tf.function
     def train_multiple_steps(iterator, steps):
+        """
+        param iterator: 数据迭代器
+        param steps: 本次训练的steps
+        """
         has_data = True
         for _ in tf.range(steps):
             optional_data = iterator.get_next_as_optional()
             if not optional_data.has_value():
                 has_data = False
                 break
-            strategy.run(step_fn, args=(optional_data.get_value(),))
-        return has_data
+            strategy.run(step_fn,  # --->>> def step_fn
+                         args=(optional_data.get_value(),)
+                         )
+        return has_data  # 用不着
+
     @tf.function
     def valid_step_fn(inputs):
         answered_correctly = inputs['answered_correctly']
@@ -108,7 +122,7 @@ def make_tpu_train_loop(strategy, model, optimizer = None, learning_rate = None)
         valid_auc.update_state(y_true, 
                                sigmoids, 
                                sample_weight = label_mask)
- 
+
     @tf.function
     def predict_and_valid(iterator):
         while tf.constant(True):
@@ -118,13 +132,16 @@ def make_tpu_train_loop(strategy, model, optimizer = None, learning_rate = None)
             valid_data = optional_data.get_value()
             strategy.run(valid_step_fn, args=(valid_data,))
 
-   
+
     def train_loop(train_ds,
                    valid_ds = None,
                    batch_size = 64,
                    steps_per_call = 128,
                    steps_per_epoch = 5500,
                    epochs = 4):
+        """
+        训练主函数
+        """
 
         batch_valid_ds = None
         if valid_ds is not None:
@@ -137,7 +154,8 @@ def make_tpu_train_loop(strategy, model, optimizer = None, learning_rate = None)
                     train_ds.batch(
                         batch_size,
                         drop_remainder = True
-                        ).prefetch(tf.data.experimental.AUTOTUNE)))             
+                        ).prefetch(tf.data.experimental.AUTOTUNE)))
+
         for epoch in range(epochs):
             if train_ds is not None:
                 steps_in_epoch = 0
@@ -181,6 +199,7 @@ if tpu:
     tf.tpu.experimental.initialize_tpu_system(tpu)
     strategy = tf.distribute.experimental.TPUStrategy(tpu)
 else:
+    # 通过 get_strategy() 可以自动识别并返回适合当前硬件环境的默认分布式策略
     strategy = tf.distribute.get_strategy() # default distribution strategy in Tensorflow. Works on CPU and single GPU.
 
 print("REPLICAS: ", strategy.num_replicas_in_sync)
@@ -296,7 +315,8 @@ decay_rate = tf.keras.experimental.CosineDecay(0.0003, 30000, .003)
 
 learning_rate = WarmUp(0.00025, decay_rate, 4000, power=0.5)
 
-train_loop = make_tpu_train_loop(strategy, tpu_model,
+train_loop = make_tpu_train_loop(strategy,
+                                 tpu_model,
                                  learning_rate = learning_rate)
 #
 # Start training loop

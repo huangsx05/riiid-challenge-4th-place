@@ -65,6 +65,7 @@ class WeightedMultiHeadAttention(tfa.layers.MultiHeadAttention):
                 )
 
         # Linear transformations
+        # 通过 tf.einsum 将 query, key, value 张量投影到多个头的子空间中
         query = tf.einsum("...NI , HIO -> ...NHO", query, self.query_kernel)
         key = tf.einsum("...MI , HIO -> ...MHO", key, self.key_kernel)
         value = tf.einsum("...MI , HIO -> ...MHO", value, self.value_kernel)
@@ -140,7 +141,7 @@ class EncoderLayer(tf.keras.layers.Layer):
                  model_dimension = 64,
                  attention_num_heads = 8,
                  feedforward_dimension = 2048,
-                 attention_dropout = 0.0, 
+                 attention_dropout = 0.0,
                  return_attn_coef = False,
                  activation = 'relu',
                  attn_weights_initializer = tf.keras.initializers.RandomUniform(
@@ -170,18 +171,18 @@ class EncoderLayer(tf.keras.layers.Layer):
                                                    feedforward_dimension,
                                                    activation = activation)
         self.ffn_dropout = tf.keras.layers.Dropout(attention_dropout)
-        
 
     def build(self, input_shape):
         assert(isinstance(input_shape, dict))
         assert('value' in input_shape)
         if 'timediff' in input_shape:
+            # time aware weighted attention
             self.attn_weight_coef = self.add_weight(name="attn_weight_coef",
-                                          shape=[self.attention_num_heads, 1, 1],
-                            initializer=self.attn_weights_initializer,
-                            regularizer=None,
-                            constraint= tf.keras.constraints.NonNeg()
-                        )
+                                                    shape=[self.attention_num_heads, 1, 1],
+                                                    initializer=self.attn_weights_initializer,
+                                                    regularizer=None,
+                                                    constraint= tf.keras.constraints.NonNeg()
+                                                    )
         super(EncoderLayer, self).build(input_shape)
 
     def compute_output_shape(self, input_shape):
@@ -195,31 +196,38 @@ class EncoderLayer(tf.keras.layers.Layer):
             return input_shape['value']
 
     def call(self, inputs, training = None):
+        """
+        自动调用
+        """
         value = inputs['value']
+
         if 'mask' in inputs:
             mask = inputs['mask']
         else:
             mask = None
+
         if 'timediff' in inputs:
-            attn_weight = inputs['timediff']*self.attn_weight_coef
+            attn_weight = inputs['timediff']*self.attn_weight_coef  # time aware weighted attention
         else:
             attn_weight = None
 
-
-        attn_output = self.mha([value, value], 
-                               mask=mask, 
+        # 多头注意力层
+        attn_output = self.mha([value, value],
+                               mask=mask,
                                attn_weight = attn_weight,
                                training = training)
+
         if self.return_attn_coef:
             attn_output, attn_coef = attn_output
-        out1 = self.layer_norm_1(value + attn_output)
-        ffn_output = self.ffn(out1)
-        ffn_output = self.ffn_dropout(ffn_output, training = training)
-        out2 = self.layer_norm_2(out1 + ffn_output)
+        out1 = self.layer_norm_1(value + attn_output)  # 归一化层
+        ffn_output = self.ffn(out1)  # 前馈神经网络
+        ffn_output = self.ffn_dropout(ffn_output, training = training)  # 随机失活
+        out2 = self.layer_norm_2(out1 + ffn_output)  # 归一化层，残差连接
         if self.return_attn_coef:
-            return out2, attn_coef  
+            return out2, attn_coef
         else:
             return out2
+
 
 class DecoderLayer(tf.keras.layers.Layer):
     r"""
@@ -298,16 +306,16 @@ class DecoderLayer(tf.keras.layers.Layer):
             return input_shape['dec_query'], qq_attn_shape, eq_attn_shape
         else:
             return input_shape['dec_query']
-    
+
     def call(self, inputs, training = None):
         encoder_out = inputs['enc_out']
         query = inputs['dec_query']
+
         if 'enc_dec_mask' in inputs:
             enc_dec_mask = inputs['enc_dec_mask']
         else:
             enc_dec_mask = None
 
-        
         if 'dec_dec_mask' in inputs:
             dec_dec_mask = inputs['dec_dec_mask']
         else:
@@ -319,31 +327,36 @@ class DecoderLayer(tf.keras.layers.Layer):
         else:
             enc_dec_attn_weight = None
             dec_dec_attn_weight = None
-        
+
+        # mha_1: q, k, v 都是 query. decoder本身的自注意力
         attn1 = self.mha_1([query, query],
-                           mask=dec_dec_mask,
+                           mask=dec_dec_mask,  # decoder 自身的 mask
                            attn_weight = dec_dec_attn_weight,
                            training = training)
         if self.return_attn_coef:
             attn1, qq_attn_coef = attn1
         out1 = self.layer_norm_1(attn1 + query)
-        
+
+        # mha_2: q 是 out1; k, v 是 encoder_out. decoder 和 encoder 之间的注意力
         attn2 = self.mha_2([out1, encoder_out],
-                           mask=enc_dec_mask,
+                           mask=enc_dec_mask,  # decoder - encoder 之间的 mask
                            attn_weight = enc_dec_attn_weight,
                            training = training)
         if self.return_attn_coef:
             attn2, eq_attn_coef = attn2
-        
+
         out2 =  self.layer_norm_2(attn2 + out1)  # (batch_size, target_seq_len, d_model)
 
         ffn_output =  self.ffn(out2)  # (batch_size, target_seq_len, d_model)
         ffn_output = self.dropout(ffn_output, training = training)
         out3 = self.layer_norm_3(ffn_output + out2)
+
         if self.return_attn_coef:
             return out3, qq_attn_coef, eq_attn_coef
         else:
             return out3
+
+
 class ContinuousEmbedding(tf.keras.layers.Layer):
     def __init__(self, output_dims,
                  num_points = 64,
@@ -408,6 +421,8 @@ class ContinuousEmbedding(tf.keras.layers.Layer):
                                                     keepdims=True))
         output = tf.matmul(w, self.embeddings)
         return output
+
+
 class ContentEmbeddingLayer(tf.keras.layers.Layer):
     r"""
     Embedding Layer for content (question or lecture)
@@ -417,12 +432,16 @@ class ContentEmbeddingLayer(tf.keras.layers.Layer):
     question_popularity, question_tags, encoded_lecture_id, lecture_part, lecture_tag, lecture_type_of
     """
     def __init__(self, embeddings_dimension,
-                 encoded_question_id = None, encoded_lecture_id = None, 
-                 question_bundle_id = None, question_part = None,
+                 encoded_question_id = None,
+                 encoded_lecture_id = None, 
+                 question_bundle_id = None,
+                 question_part = None,
                  question_tags = None,
-                 question_difficulty = None, question_popularity = None,
-                 lecture_part = None, lecture_tag = None, 
-                 lecture_type_of = None, 
+                 question_difficulty = None,
+                 question_popularity = None,
+                 lecture_part = None,
+                 lecture_tag = None,
+                 lecture_type_of = None,
                  embeddings_initializer='uniform',
                  **kwargs):
         super(ContentEmbeddingLayer, self).__init__(**kwargs)
@@ -442,7 +461,7 @@ class ContentEmbeddingLayer(tf.keras.layers.Layer):
         question_emb_dim = 0
         if encoded_question_id is not None:
             self.qid_emb_layer = tf.keras.layers.Embedding(
-                1 + max(encoded_question_id),
+                1 + max(encoded_question_id),  # +1: 考虑 0 填充
                 embeddings_dimension,
                 embeddings_initializer = self.embeddings_initializer,
                 name = 'question_id_embedding',
@@ -487,7 +506,6 @@ class ContentEmbeddingLayer(tf.keras.layers.Layer):
             )
             question_emb_dim += embeddings_dimension
 
-         
         if question_difficulty is not None:
             self.qdifficulty_emb_layer = ContinuousEmbedding(
                 embeddings_dimension,
@@ -538,16 +556,18 @@ class ContentEmbeddingLayer(tf.keras.layers.Layer):
         self.dense_1 = tf.keras.layers.Dense(4*embeddings_dimension)
         self.dense_2 = tf.keras.layers.Dense(4*embeddings_dimension)
         self.layer_norm = tf.keras.layers.LayerNormalization(epsilon = 1e-6)
+
     def build(self, input_shape):
-        #Questions
+        """
+        build 方法是自动运行的，它会在层首次接收到输入时被触发，从而实现根据输入形状动态创建层权重的功能。
+        """
+        ##### Questions
+        # convert to tensor
         self.ts_encoded_question_id = tf.convert_to_tensor(
             self.encoded_question_id)
- 
         if self.question_bundle_id is not None:
-
             self.ts_question_bundle_id= tf.convert_to_tensor(
                 self.question_bundle_id)
-                
         if self.question_part is not None:
             self.ts_question_part = tf.convert_to_tensor(
                 self.question_part
@@ -568,9 +588,11 @@ class ContentEmbeddingLayer(tf.keras.layers.Layer):
             self.ts_question_difficulty = tf.convert_to_tensor(
                 self.question_difficulty
             )
+
+        # 在 TensorFlow 里，self.add_weight 是 tf.keras.layers.Layer 类中的一个重要方法，它主要用于在自定义层中创建可训练或不可训练的权重（即变量）。
         self.computed_params = self.add_weight(
             shape = [
-                     len(self.encoded_question_id) + 
+                     len(self.encoded_question_id) +
                      len(self.encoded_lecture_id),
                      4*self.embeddings_dimension
                      ],
@@ -586,27 +608,24 @@ class ContentEmbeddingLayer(tf.keras.layers.Layer):
             aggregation = tf.VariableAggregation.ONLY_FIRST_REPLICA,
             name = 'params_computed'
         )
-        ##### Lectures
 
+        ##### Lectures
         self.ts_encoded_lecture_id = tf.convert_to_tensor(
             self.encoded_lecture_id)
-          
         if self.lecture_part is not None:
             self.ts_lecture_part = tf.convert_to_tensor(self.lecture_part)
-
         if self.lecture_tag is not None:
             self.ts_lecture_tag = tf.convert_to_tensor(self.lecture_tag)
-              
         if self.lecture_type_of is not None:
-
             self.ts_lecture_type_of =  tf.convert_to_tensor(self.lecture_type_of)
-               
+
         super(ContentEmbeddingLayer, self).build(input_shape)
 
     def compute_output_shape(self, input_shape):
         return input_shape + (self.model_dimension,)
 
     def _compute_content_params(self):
+        # questions
         question_emb = []
         if self.encoded_question_id is not None:
             question_emb.append(self.qid_emb_layer(
@@ -614,7 +633,6 @@ class ContentEmbeddingLayer(tf.keras.layers.Layer):
               )
             )
         if self.question_bundle_id is not None:
-
             question_emb.append(self.qbid_emb_layer(
                 self.ts_question_bundle_id
                 )
@@ -623,9 +641,8 @@ class ContentEmbeddingLayer(tf.keras.layers.Layer):
             question_emb.append(self.qp_emb_layer(
                 self.ts_question_part
                 )
-            )     
+            )
         if self.question_tags is not None:
-
             question_tags_emb = self.qt_emb_layer(
                 self.ts_question_tags
                 )*self.ts_tags_mask
@@ -647,7 +664,6 @@ class ContentEmbeddingLayer(tf.keras.layers.Layer):
             lecture_emb.append(self.lid_emb_layer(
               self.ts_encoded_lecture_id
             ))
-
         if self.lecture_part is not None:
             lecture_emb.append(self.lp_emb_layer(
                 self.ts_lecture_part
@@ -664,23 +680,26 @@ class ContentEmbeddingLayer(tf.keras.layers.Layer):
                 self.ts_lecture_type_of
                 )
             )
+        # lecture_emb
         lecture_emb = tf.concat(lecture_emb, axis = -1)
-        lecture_emb = self.dense_1(lecture_emb)
+        lecture_emb = self.dense_1(lecture_emb)  # tf.keras.layers.Dense
+        # question_emb
         question_emb = tf.concat(question_emb, axis = -1)
         question_emb = self.dense_2(question_emb)
+        # question + lecture
         content_emb_params = tf.concat([question_emb,
                                         lecture_emb], axis=0)
-        content_emb_params = self.layer_norm(content_emb_params)
+        content_emb_params = self.layer_norm(content_emb_params)  # 归一化层
         return content_emb_params
 
     def call(self, encoded_content_id, training = True):
-        if training:
-            content_emb_params = self._compute_content_params()
+        if training:  # 训练模式
+            content_emb_params = self._compute_content_params()  # question + lecture embedding
             if self.params_computed > 0.5:
-                self.params_computed.assign(0.0)
-            return  tf.gather(content_emb_params, encoded_content_id)
-        else:
-            if self.params_computed < 0.5: 
+                self.params_computed.assign(0.0)  # 如果 self.params_computed 大于 0.5，则将其值重置为 0.0
+            return  tf.gather(content_emb_params, encoded_content_id)  # tf.gather 根据索引从输入张量中收集元素，类似字典
+        else:  # 推理模式
+            if self.params_computed < 0.5:
                 self.computed_params.assign(self._compute_content_params())
                 self.params_computed.assign(1.0)
             return tf.gather(self.computed_params, encoded_content_id)
@@ -691,7 +710,7 @@ class RiiidAnswerModel(tf.keras.Model):
     RiiidAnswerModel to output the logits of the target variable (answered_correctly)
     """
     def __init__(self,
-                 encoded_content_map,
+                 encoded_content_map,  # output of data_prepare.py
                  model_dimension = 512,
                  embeddings_dimension = 64,
                  attention_num_heads = 8,
@@ -752,13 +771,13 @@ class RiiidAnswerModel(tf.keras.Model):
             embeddings_initializer = self.embeddings_initializer,
             name = 'content_embedding'
                                   )
-        
+
         self.first_token_emb_layer = tf.keras.layers.Embedding(
             1,
             model_dimension,
             embeddings_initializer = self.embeddings_initializer,
             name='first_token_embedding')
-        
+
         self.aswcor_emb_layer = tf.keras.layers.Embedding(
             3,
             embeddings_dimension,
@@ -796,15 +815,17 @@ class RiiidAnswerModel(tf.keras.Model):
             name = 'time_lag_embedding' )
         self.emb_dense_layer_1 = tf.keras.layers.Dense(model_dimension)
         self.emb_dense_layer_2 = tf.keras.layers.Dense(model_dimension)
-        self.encoders = [ EncoderLayer(model_dimension, attention_num_heads,
-                                       feedforward_dimension, attention_dropout,
+        self.encoders = [ EncoderLayer(model_dimension,
+                                       attention_num_heads,
+                                       feedforward_dimension,
+                                       attention_dropout,
                                        return_attn_coef = return_attn_coef,
                                        activation = activation,
-                                       attn_weights_initializer=self.attn_weights_initializer,
+                                       attn_weights_initializer = self.attn_weights_initializer,
                                        name = f'encoder_layer_{i}')
                          for i in range(num_encoder_layers)
                          ]
-        
+
         self.decoders = [ DecoderLayer(model_dimension, attention_num_heads, 
                                        feedforward_dimension, attention_dropout,
                                        return_attn_coef = return_attn_coef,
@@ -816,13 +837,17 @@ class RiiidAnswerModel(tf.keras.Model):
 
         self.final_dense_layer = tf.keras.layers.Dense(1, name='final_dense_layer')
 
+
     def build(self, input_shape):
         assert(isinstance(input_shape, dict))
         assert('encoded_content_id' in input_shape)
-        
 
 
     def call(self, inputs, training = None):
+        """
+        当调用 model(x) 时，会自动执行模型的 call 方法来完成前向传播
+        """
+        # 从inputs获取各字段数值
         timestamp = inputs['timestamp']
         time_lag = inputs['time_lag']
         encoded_content_id = inputs['encoded_content_id']
@@ -831,34 +856,34 @@ class RiiidAnswerModel(tf.keras.Model):
         question_elapsed_time = inputs['question_elapsed_time']
         question_had_explanation = inputs['question_had_explanation']
         non_padding_mask = inputs['non_padding_mask']
+
         #### Calculate embedding of questions and lectures and appending them
-        content_emb = self.content_emb_layer(
+        content_emb = self.content_emb_layer(  # --->>> ContentEmbeddingLayer
             encoded_content_id,
             training = training
             )
 
-
         question_mask = tf.expand_dims(
-            tf.cast(tf.less(encoded_content_id, self.num_question), 
+            tf.cast(tf.less(encoded_content_id, self.num_question),
                     tf.float32),
             -1)
-        
-        
+
         answered_correctly_emb = self.aswcor_emb_layer(
             1+answered_correctly
             ) * question_mask
-        encoded_question_id = tf.clip_by_value(encoded_content_id, clip_value_min = 0, 
+
+        encoded_question_id = tf.clip_by_value(encoded_content_id, clip_value_min = 0,
                                        clip_value_max = self.num_question - 1)
+
         user_answer_id = (
             4*encoded_question_id
             + tf.clip_by_value(user_answer, 
                                clip_value_min = 0, 
                                clip_value_max = 3)
         )
-    
-    
+
         user_answer_emb = self.uasw_emb_layer(user_answer_id) * question_mask
-        
+
         question_had_explanation_emb = self.qexpl_emb_layer(
             tf.clip_by_value(
                 question_had_explanation,
@@ -884,16 +909,16 @@ class RiiidAnswerModel(tf.keras.Model):
             time_lag/tf.constant(self.max_time_lag, dtype= tf.float32),
             clip_value_min = 0,
             clip_value_max = 999999.0
-            
+
         )
         time_lag_float = tf.math.sqrt(time_lag_float)
         time_lag_emb = self.timelag_emb_layer(
            time_lag_float
         )
-        
+
         ### Transformer inputs
         encoder_value = self.emb_dense_layer_1(
-            tf.concat([
+            tf.concat([  # 用的是 concat 而不是直接相加
                        content_emb,
                        answered_correctly_emb,
                        question_elapsed_time_emb,
@@ -902,27 +927,27 @@ class RiiidAnswerModel(tf.keras.Model):
                        time_lag_emb
                        ], axis = -1)
             )
-                    
-    
-        decoder_query =  self.emb_dense_layer_2(
+
+        decoder_query =  self.emb_dense_layer_2(  # decoder query
             tf.concat([
-                       content_emb,
-                       time_lag_emb
+                       content_emb,  # encoder 中也有
+                       time_lag_emb  # encoder 中也有
                        ], axis = -1)
             )
-                     
-        first_token_emb = self.first_token_emb_layer(tf.zeros_like(timestamp[:, 0:1])) 
+
+        first_token_emb = self.first_token_emb_layer(tf.zeros_like(timestamp[:, 0:1]))
         #
-        #To avoid this situation where no encoder position attends to the first position of the decoder,
-        #the encoder value is pre-padded with a first_token_embedding which attends to all positions of the decoder
+        # To avoid this situation where no encoder position attends to the first position of the decoder,
+        # the encoder value is pre-padded with a first_token_embedding which attends to all positions of the decoder
         #
-        
-        encoder_value = tf.concat([first_token_emb, encoder_value], axis = 1)
+        encoder_value = tf.concat([first_token_emb, encoder_value], axis = 1)  # encoder inputs
+
         # Compute the masks
 
         non_padding_mask_expanded = tf.expand_dims(non_padding_mask,1)
-        dec_dec_mask = tf.cast(tf.greater_equal(tf.expand_dims(timestamp, -1), 
-                  tf.expand_dims(timestamp, -2)), tf.float32)
+        dec_dec_mask = tf.cast(tf.greater_equal(tf.expand_dims(timestamp, -1),
+                                                tf.expand_dims(timestamp, -2)),
+                                                tf.float32)
         dec_dec_mask *= non_padding_mask_expanded
 
         enc_enc_mask = tf.pad(dec_dec_mask, [[0,0], [1, 0], [0,0]], constant_values = 0)
@@ -933,11 +958,11 @@ class RiiidAnswerModel(tf.keras.Model):
                   tf.greater(
                       tf.expand_dims(timestamp, -1),
                       tf.expand_dims(timestamp, -2)),
-                  tf.expand_dims(timestamp[:1,:], -2) == -1    
-                  ), 
+                  tf.expand_dims(timestamp[:1,:], -2) == -1
+                  ),
                   tf.float32)
         excluding_ahead_mask *= non_padding_mask_expanded
-        
+
         #
         # First token of the encoder output attends to all positions of the decoder
         #
@@ -948,20 +973,22 @@ class RiiidAnswerModel(tf.keras.Model):
             timediff = tf.expand_dims(
                 timestamp_float,
                 -1) - tf.expand_dims(
-                    timestamp_float, 
+                    timestamp_float,
                 -2)
             timediff *= tf.cast(timediff > 0, tf.float32)
 
             timediff /= tf.constant(self.timestamp_scale, tf.float32)
             timediff = tf.math.log1p(timediff)
-            timediff = tf.expand_dims(timediff, -3) #batch_size, 1, seq_length, seq_length 
+            timediff = tf.expand_dims(timediff, -3) #batch_size, 1, seq_length, seq_length
             enc_enc_timediff = tf.pad(timediff, [[0,0], [0,0], [1,0], [1,0]])
             enc_dec_timediff = tf.pad(timediff, [[0,0], [0,0], [0,0], [1,0]])
+
         if self.return_attn_coef:
             ee_attn_coefs = []
             dd_attn_coefs = []
             ed_attn_coefs = []
 
+        # num_encoder_layers encodes
         for i, encoder in enumerate(self.encoders):
             enc_input = {
                 'value': encoder_value, 
@@ -970,15 +997,19 @@ class RiiidAnswerModel(tf.keras.Model):
             if self.timediff_attn:
                 enc_input['timediff'] = enc_enc_timediff
 
-            encoder_value = encoder(enc_input,
+            # encode 的 q, k, v 都是 enc_input
+            encoder_value = encoder(enc_input,  # --->>> EncoderLayer.call
                                     training = training)
+
             if self.return_attn_coef:
                 encoder_value, ee_attn_coef = encoder_value
                 ee_attn_coefs.append(ee_attn_coef)
+
+        # num_decoder_layers decodes
         for i, decoder in enumerate(self.decoders):
             dec_input = {
                 'dec_query': decoder_query,
-                'enc_out': encoder_value,
+                'enc_out': encoder_value,  # encoder 输出
                 'dec_dec_mask': dec_dec_mask,
                 'enc_dec_mask': enc_dec_mask,
             }
@@ -986,17 +1017,18 @@ class RiiidAnswerModel(tf.keras.Model):
                 dec_input['dec_dec_timediff'] = timediff
                 dec_input['enc_dec_timediff'] = enc_dec_timediff
 
+            decoder_query = decoder(dec_input,
+                                    training = training)
 
-            decoder_query = decoder(dec_input, 
-                                      training = training)
             if self.return_attn_coef:
                 decoder_query, dd_attn_coef, ed_attn_coef = decoder_query
                 dd_attn_coefs.append(dd_attn_coef)
                 ed_attn_coefs.append(ed_attn_coef)
 
+        # 全连接层
         output = self.final_dense_layer(decoder_query)
+
         if self.return_attn_coef:
             return output, ee_attn_coefs, dd_attn_coefs, ed_attn_coefs
         else:
             return output
-        
